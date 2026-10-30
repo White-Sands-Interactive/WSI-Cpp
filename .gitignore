@@ -1,0 +1,6 @@
+build/
+cmake-build-*/
+.wsi/
+.DS_Store
+compile_commands.json
+CMakeUserPresets.json
