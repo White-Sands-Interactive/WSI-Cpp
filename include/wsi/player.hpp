@@ -259,6 +259,32 @@ class Player {
         upsert(std::move(bound));
     }
 
+    /// Register an action from a callable. Scripting hosts use this when the
+    /// tool list is data rather than a set of C++ methods. `see` is allowed.
+    /// `wait` and names that start with `_` are not.
+    void bind_dynamic(std::string name, std::string description, std::vector<ArgSpec> specs,
+                      std::function<Json(const Json&)> invoke) {
+        if (name.empty() || name == "wait" || name.front() == '_') {
+            throw std::runtime_error("cannot publish action \"" + name + "\"");
+        }
+        if (!invoke) {
+            throw std::runtime_error("cannot publish action \"" + name + "\"");
+        }
+        std::vector<ArgSpec> checked = specs;
+        Bound bound;
+        bound.name = std::move(name);
+        bound.description = description.empty() ? ("Action: " + bound.name) : std::move(description);
+        bound.specs = std::move(specs);
+        bound.invoke = [checked = std::move(checked), invoke = std::move(invoke)](const Json& raw) -> Json {
+            const auto error = detail::check_args(raw, checked);
+            if (!error.empty()) {
+                throw std::runtime_error(error);
+            }
+            return invoke(raw.is_object() ? raw : Json::object());
+        };
+        upsert(std::move(bound));
+    }
+
     ReflectedPlayer reflect();
 
  private:

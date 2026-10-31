@@ -365,6 +365,38 @@ int main() {
         CHECK(action.invoke(wsi::Json{{"dx", 2}, {"dy", 3}}) == 5);
     });
 
+    test("bind_dynamic publishes a callable and checks its arguments", [] {
+        class Dynamic : public wsi::Player {
+         public:
+            Dynamic() {
+                bind_dynamic("see", "", {}, [this](const wsi::Json&) { return wsi::Json{{"n", n}}; });
+                bind_dynamic("add", "Add dx", {wsi::integer("dx")}, [this](const wsi::Json& args) {
+                    n += args.at("dx").get<int>();
+                    return wsi::Json{{"n", n}};
+                });
+            }
+            int n = 1;
+        } player;
+        const auto reflected = player.reflect();
+        CHECK(reflected.actions.size() == 1);
+        CHECK(reflected.actions[0].name == "add");
+        CHECK(reflected.actions[0].invoke(wsi::Json{{"dx", 4}}) == wsi::Json{{"n", 5}});
+        bool rejected = false;
+        try {
+            reflected.actions[0].invoke(wsi::Json{{"dx", "no"}});
+        } catch (const std::runtime_error& ex) {
+            rejected = std::string(ex.what()).find("dx") != std::string::npos;
+        }
+        CHECK(rejected);
+        bool hidden = false;
+        try {
+            player.bind_dynamic("wait", "", {}, [](const wsi::Json&) { return wsi::Json(nullptr); });
+        } catch (const std::runtime_error&) {
+            hidden = true;
+        }
+        CHECK(hidden);
+    });
+
     test("reflect requires see and rejects a missing declared action", [] {
         try {
             NoSee player;

@@ -155,6 +155,10 @@ class AgentServer {
     /// Stop every session and close the platform connection.
     void close();
 
+    /// Close the socket so a blocked start() or turn() returns. Local sessions
+    /// are left in place until close().
+    void interrupt();
+
  private:
     struct State;
     std::shared_ptr<State> state_;

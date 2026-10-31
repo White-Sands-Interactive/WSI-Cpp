@@ -24,6 +24,13 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
+if(NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 UNKNOWN IMPORTED)
+    set_target_properties(SQLite3::SQLite3 PROPERTIES
+        IMPORTED_LOCATION "${SQLITE3_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SQLITE3_INCLUDE_DIR}"
+    )
+endif()
 find_package(OpenSSL REQUIRED)
 
 add_library(wsi_agent_player
@@ -58,6 +65,7 @@ target_link_libraries(wsi_agent_player
 
 target_compile_options(wsi_agent_player PRIVATE -Wall -Wextra -Wpedantic)
 
+if(NOT WSI_EMBEDDED)
 add_executable(wsi_agent_player_tests tests/agent_player_test.cpp)
 target_link_libraries(wsi_agent_player_tests PRIVATE wsi_agent_player)
 target_include_directories(wsi_agent_player_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -77,6 +85,7 @@ add_test(NAME agent_player COMMAND wsi_agent_player_tests)
 add_test(NAME forest COMMAND wsi_forest)
 add_test(NAME courier COMMAND wsi_courier)
 add_test(NAME ferry COMMAND wsi_ferry)
+endif()
 
 install(TARGETS wsi_agent_player ARCHIVE)
 install(DIRECTORY include/wsi DESTINATION include)

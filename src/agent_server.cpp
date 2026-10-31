@@ -187,13 +187,17 @@ void AgentServer::State::ensure_connected() {
         return;
     }
     auto self = shared_from_this();
-    connection = std::make_shared<PlatformConnection>(
+    auto next = std::make_shared<PlatformConnection>(
         url, key, logger, [self](const Json& envelope) { self->on_envelope(envelope); },
         [self] { self->emit(AgentEvent{"disconnected", std::nullopt, std::nullopt, std::nullopt, std::nullopt}); },
         [self] { self->emit(AgentEvent{"reconnected", std::nullopt, std::nullopt, std::nullopt, std::nullopt}); },
         [self](std::exception_ptr error) { self->on_connection_error(std::move(error)); },
         [self] { return self->resumable(); });
-    connection->connect();
+    {
+        std::lock_guard lock(mu);
+        connection = next;
+    }
+    next->connect();
     started = true;
 }
 
@@ -437,6 +441,16 @@ Subscription AgentServer::on(EventListener listener) {
         std::lock_guard lock(state->mu);
         std::erase_if(state->listeners, [&](const auto& item) { return item.first == id; });
     });
+}
+
+void AgentServer::interrupt() {
+    if (!state_) return;
+    std::shared_ptr<PlatformConnection> connection;
+    {
+        std::lock_guard lock(state_->mu);
+        connection = state_->connection;
+    }
+    if (connection) connection->close();
 }
 
 void AgentServer::close() {
