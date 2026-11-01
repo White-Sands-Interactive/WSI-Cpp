@@ -2,7 +2,13 @@
 
 #include "log.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <string>
+#include <tuple>
 #include <utility>
+#include <vector>
 
 namespace wsi {
 namespace {
@@ -19,6 +25,186 @@ std::string tool_error_message(const detail::ToolPayload& result) {
         return error.dump();
     }
     return result.text;
+}
+
+constexpr int kMaxActiveSubgoals = 8;
+constexpr int kMaxSubgoalRunes = 240;
+constexpr int kMaxProgressNotes = 5;
+constexpr int kMaxSubgoalCallsPerTurn = 4;
+
+constexpr const char* kSubgoalInstructions =
+    "Subgoals last until you complete them, and only while this session is alive. The session goal stays for the "
+    "whole session. Call add_subgoal to add one, update_subgoal to record progress, and complete_subgoal to retire "
+    "it. Those calls are not a game move. After them, call exactly one game action.";
+
+bool is_subgoal_tool(const std::string& name) {
+    return name == "add_subgoal" || name == "update_subgoal" || name == "complete_subgoal";
+}
+
+bool is_state_tool(const std::string& name) { return name == "wait" || name == "see"; }
+
+std::size_t utf8_length(const std::string& text) {
+    std::size_t count = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) ++count;
+    }
+    return count;
+}
+
+std::string trim_copy(std::string text) {
+    const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
+    text.erase(text.begin(), std::find_if(text.begin(), text.end(), not_space));
+    text.erase(std::find_if(text.rbegin(), text.rend(), not_space).base(), text.end());
+    return text;
+}
+
+std::string arg_string(const Json& args, const std::string& key) {
+    if (!args.is_object() || !args.contains(key) || args.at(key).is_null()) return "";
+    const Json& value = args.at(key);
+    if (value.is_string()) return trim_copy(value.get<std::string>());
+    if (value.is_number()) {
+        const double number = value.get<double>();
+        if (number >= 0 && number < 1e15 && number == std::trunc(number)) {
+            return std::to_string(static_cast<long long>(number));
+        }
+    }
+    return "";
+}
+
+struct Subgoal {
+    std::string id;
+    std::string objective;
+    std::vector<std::string> notes;
+};
+
+struct SubgoalBoard {
+    std::vector<Subgoal> items;
+    int next = 0;
+    int calls = 0;
+
+    void begin_turn() { calls = 0; }
+    bool open() const { return calls < kMaxSubgoalCallsPerTurn; }
+
+    std::string list_text() const {
+        if (items.empty()) return "Active subgoals: none.";
+        std::string text = "Active subgoals:";
+        for (const auto& item : items) {
+            text += "\n" + item.id + ". " + item.objective;
+            text += "\n   progress: ";
+            if (item.notes.empty()) {
+                text += "none";
+            } else {
+                for (std::size_t i = 0; i < item.notes.size(); ++i) {
+                    if (i != 0) text += "; ";
+                    text += item.notes[i];
+                }
+            }
+        }
+        return text;
+    }
+
+    /// A call past the per-turn cap is refused and does not change the board.
+    /// Other rejections still count toward the cap. The string result is the
+    /// model-facing text, the id, and the error. An empty error means success.
+    std::tuple<std::string, std::string, std::string> apply(const std::string& name, const Json& args) {
+        if (!open()) return {"", "", "subgoal tools are closed for this turn"};
+        ++calls;
+        if (name == "add_subgoal") return add(arg_string(args, "objective"));
+        if (name == "update_subgoal") return update(arg_string(args, "id"), arg_string(args, "progress"));
+        if (name == "complete_subgoal") return complete(arg_string(args, "id"));
+        return {"", "", "unknown subgoal tool " + name};
+    }
+
+    std::tuple<std::string, std::string, std::string> add(const std::string& raw) {
+        const std::string objective = trim_copy(raw);
+        if (objective.empty()) return {"", "", "objective is required"};
+        if (utf8_length(objective) > static_cast<std::size_t>(kMaxSubgoalRunes)) {
+            return {"", "", "objective must be " + std::to_string(kMaxSubgoalRunes) + " characters or less"};
+        }
+        if (static_cast<int>(items.size()) >= kMaxActiveSubgoals) {
+            return {"", "", std::to_string(kMaxActiveSubgoals) +
+                                " active subgoals is the maximum. Complete one before adding another."};
+        }
+        ++next;
+        const std::string id = std::to_string(next);
+        items.push_back(Subgoal{id, objective, {}});
+        return {"Added subgoal " + id + ": " + objective + ".", id, ""};
+    }
+
+    std::tuple<std::string, std::string, std::string> update(const std::string& id, const std::string& raw) {
+        if (id.empty()) return {"", "", "id is required"};
+        const std::string progress = trim_copy(raw);
+        if (progress.empty()) return {"", id, "progress is required"};
+        if (utf8_length(progress) > static_cast<std::size_t>(kMaxSubgoalRunes)) {
+            return {"", id, "progress must be " + std::to_string(kMaxSubgoalRunes) + " characters or less"};
+        }
+        Subgoal* item = find(id);
+        if (item == nullptr) return {"", id, "no active subgoal with id " + id};
+        item->notes.push_back(progress);
+        if (static_cast<int>(item->notes.size()) > kMaxProgressNotes) {
+            item->notes.erase(item->notes.begin(), item->notes.end() - kMaxProgressNotes);
+        }
+        return {"Updated subgoal " + id + ".", id, ""};
+    }
+
+    std::tuple<std::string, std::string, std::string> complete(const std::string& id) {
+        if (id.empty()) return {"", "", "id is required"};
+        for (auto it = items.begin(); it != items.end(); ++it) {
+            if (it->id != id) continue;
+            const std::string objective = it->objective;
+            items.erase(it);
+            return {"Completed subgoal " + id + " (" + objective + "). It is no longer active.", id, ""};
+        }
+        return {"", id, "no active subgoal with id " + id};
+    }
+
+    Subgoal* find(const std::string& id) {
+        for (auto& item : items) {
+            if (item.id == id) return &item;
+        }
+        return nullptr;
+    }
+};
+
+Json subgoal_tools() {
+    return Json::array({
+        Json{{"name", "add_subgoal"},
+             {"description", "Add a subgoal for this session. It stays until you complete it. This is not a game move."},
+             {"inputSchema",
+              Json{{"type", "object"},
+                   {"properties", Json{{"objective", Json{{"type", "string"}, {"description", "What this subgoal is, in one sentence."}}}}},
+                   {"required", Json::array({"objective"})},
+                   {"additionalProperties", false}}}},
+        Json{{"name", "update_subgoal"},
+             {"description", "Record progress on an active subgoal. This is not a game move."},
+             {"inputSchema",
+              Json{{"type", "object"},
+                   {"properties",
+                    Json{{"id", Json{{"type", "string"}}},
+                         {"progress", Json{{"type", "string"}, {"description", "What has happened toward this subgoal."}}}}},
+                   {"required", Json::array({"id", "progress"})},
+                   {"additionalProperties", false}}}},
+        Json{{"name", "complete_subgoal"},
+             {"description", "Complete an active subgoal and drop it. This is not a game move."},
+             {"inputSchema",
+              Json{{"type", "object"},
+                   {"properties", Json{{"id", Json{{"type", "string"}}}}},
+                   {"required", Json::array({"id"})},
+                   {"additionalProperties", false}}}},
+    });
+}
+
+Json decision_tools(const Json& actions, bool open) {
+    Json tools = actions;
+    if (!open) return tools;
+    for (const auto& tool : subgoal_tools()) tools.push_back(tool);
+    return tools;
+}
+
+std::string turn_prompt(const std::string& view, const std::string& goals) {
+    return "It is your turn. Current view:\n" + view + "\n\n" + goals +
+           "\n\nYou may call add_subgoal, update_subgoal, or complete_subgoal. Those are not a move.\n"
+           "Otherwise call exactly one action tool.";
 }
 
 }  // namespace
@@ -38,6 +224,15 @@ AgentEvent loop_event_to_agent_event(const std::string& session_id, const Json& 
         out.action = event.value("action", "unknown");
         out.args = event.contains("args") && event.at("args").is_object() ? event.at("args") : Json::object();
         out.error = event.value("error", "action failed");
+        return out;
+    }
+    if (name == "subgoal") {
+        out.type = "subgoal";
+        out.action = event.value("action", "unknown");
+        out.args = event.contains("args") && event.at("args").is_object() ? event.at("args") : Json::object();
+        if (event.contains("error") && event.at("error").is_string() && !event.at("error").get<std::string>().empty()) {
+            out.error = event.at("error").get<std::string>();
+        }
         return out;
     }
     out.type = "turnFailed";
@@ -102,9 +297,11 @@ void SessionLoop::run() {
     if (listed.is_array()) {
         for (const auto& tool : listed) {
             const std::string name = tool.value("name", "");
-            if (name != "wait" && name != "see") action_tools.push_back(tool);
+            if (is_state_tool(name) || is_subgoal_tool(name)) continue;
+            action_tools.push_back(tool);
         }
     }
+    SubgoalBoard subgoals;
     while (!stopped_) {
         detail::ToolPayload wait_result;
         try {
@@ -125,97 +322,123 @@ void SessionLoop::run() {
 
         TokenUsage usage;
         std::vector<Attempt> attempt_details;
-        Json messages = Json::array({Json{{"role", "user"},
-                                           {"content", "It is your turn. Current view:\n" + wait_result.text +
-                                                           "\nCall exactly one action tool."}}});
-        testing::ToolCall action = decide(action_tools, messages, usage);
-        detail::ToolPayload result;
-        bool have_result = false;
-        std::string first_error;
-        if (action.name == "wait" || action.name == "see") {
-            first_error = action.name + " is not an action";
-        } else {
-            emit(Json{{"event", "action"}, {"action", action.name}, {"args", action.arguments}});
-            result = call_tool(action.name, action.arguments);
-            have_result = true;
-            if (!result.is_error) {
-                TurnReport report;
-                report.ok = true;
-                report.action = action.name;
-                report.args = action.arguments;
-                report.result = result.json;
-                report.attempts = 1;
-                report.usage = usage;
-                if (on_turn_result_) on_turn_result_(report);
+        subgoals.begin_turn();
+        Json messages = Json::array(
+            {Json{{"role", "user"}, {"content", turn_prompt(wait_result.text, subgoals.list_text())}}});
+
+        for (;;) {
+            testing::ToolCall call = decide(decision_tools(action_tools, subgoals.open()), messages, usage);
+            if (is_subgoal_tool(call.name) && subgoals.open()) {
+                const auto [text, id, call_error] = subgoals.apply(call.name, call.arguments);
+                Json args = call.arguments.is_object() ? call.arguments : Json::object();
+                if (!id.empty()) args["id"] = id;
+                Json event = Json{{"event", "subgoal"}, {"action", call.name}, {"args", args}};
+                std::string content = text;
+                if (!call_error.empty()) {
+                    event["error"] = call_error;
+                    content = call_error;
+                    log_line(logger_, "info", "subgoal rejected " + call.name + ": " + call_error);
+                } else {
+                    log_line(logger_, "info", "subgoal updated " + call.name + " id " + id);
+                }
+                emit(event);
+                content += "\n\n" + subgoals.list_text();
+                messages.push_back(Json{{"role", "assistant"},
+                                        {"content", "Called " + call.name + "(" + call.arguments.dump() + ")"}});
+                messages.push_back(Json{{"role", "tool"},
+                                        {"name", call.name},
+                                        {"content", content},
+                                        {"isError", !call_error.empty()}});
+                if (!subgoals.open()) {
+                    messages.push_back(Json{{"role", "user"},
+                                            {"content",
+                                             "Subgoal tools are closed for this turn. Call exactly one game action. "
+                                             "Do not call wait or see."}});
+                }
                 continue;
             }
-            first_error = tool_error_message(result);
+
+            std::string action_error;
+            detail::ToolPayload result;
+            bool failed = false;
+            if (is_subgoal_tool(call.name)) {
+                action_error = "subgoal tools are closed for this turn";
+                failed = true;
+            } else if (is_state_tool(call.name)) {
+                action_error = call.name + " is not an action";
+                failed = true;
+            } else {
+                emit(Json{{"event", "action"}, {"action", call.name}, {"args", call.arguments}});
+                result = call_tool(call.name, call.arguments);
+                if (result.is_error) {
+                    action_error = tool_error_message(result);
+                    failed = true;
+                }
+            }
+            if (!failed) {
+                TurnReport report;
+                report.ok = true;
+                report.action = call.name;
+                report.args = call.arguments;
+                report.result = result.json;
+                report.attempts = static_cast<int>(attempt_details.size()) + 1;
+                report.usage = usage;
+                if (on_turn_result_) on_turn_result_(report);
+                break;
+            }
+            if (!attempt_details.empty() && (is_state_tool(call.name) || is_subgoal_tool(call.name))) {
+                const std::string message = "Retry returned " + call.name + " instead of an action (after: " +
+                                            attempt_details.back().error + ")";
+                emit(Json{{"event", "turnFailed"}, {"error", message}});
+                TurnReport report;
+                report.ok = false;
+                report.error = message;
+                report.attempts = static_cast<int>(attempt_details.size());
+                report.attempt_details = attempt_details;
+                report.usage = usage;
+                if (on_turn_result_) on_turn_result_(report);
+                break;
+            }
+
+            attempt_details.push_back(Attempt{call.name, call.arguments, action_error});
+            if (attempt_details.size() >= 2) {
+                log_line(logger_, "warn", "session " + session_id_ + " retry " + call.name + " failed: " + action_error);
+                emit(Json{{"event", "turnFailed"},
+                          {"action", call.name},
+                          {"args", call.arguments},
+                          {"error", action_error}});
+                TurnReport report;
+                report.ok = false;
+                report.error = action_error;
+                report.attempts = 2;
+                report.attempt_details = std::move(attempt_details);
+                report.usage = usage;
+                if (on_turn_result_) on_turn_result_(report);
+                break;
+            }
+
+            log_line(logger_, "warn",
+                     "session " + session_id_ + " action " + call.name + " failed: " + action_error + "; retrying once");
+            emit(Json{{"event", "retry"}, {"action", call.name}, {"args", call.arguments}, {"error", action_error}});
+            const std::string tool_text = result.text.empty() ? action_error : result.text;
+            messages.push_back(
+                Json{{"role", "assistant"}, {"content", "Called " + call.name + "(" + call.arguments.dump() + ")"}});
+            messages.push_back(
+                Json{{"role", "tool"}, {"name", call.name}, {"content", tool_text}, {"isError", true}});
+            messages.push_back(Json{{"role", "user"},
+                                    {"content", "Action " + call.name + " failed: " + action_error +
+                                                    "\nRetry once with a different legal action (or different arguments)."
+                                                    "\nDo not repeat the same failing call. Do not call wait or see."
+                                                    "\nCurrent view was:\n" +
+                                                    wait_result.text}});
         }
-
-        attempt_details.push_back(Attempt{action.name, action.arguments, first_error});
-        log_line(logger_, "warn",
-                 "session " + session_id_ + " action " + action.name + " failed: " + first_error + "; retrying once");
-        emit(Json{{"event", "retry"}, {"action", action.name}, {"args", action.arguments}, {"error", first_error}});
-        messages.push_back(Json{{"role", "assistant"},
-                                {"content", "Called " + action.name + "(" + action.arguments.dump() + ")"}});
-        messages.push_back(Json{{"role", "tool"},
-                                {"name", action.name},
-                                {"content", have_result ? result.text : first_error},
-                                {"isError", true}});
-        messages.push_back(Json{{"role", "user"},
-                                {"content", "Action " + action.name + " failed: " + first_error +
-                                                "\nRetry once with a different legal action (or different arguments)."
-                                                "\nDo not repeat the same failing call. Do not call wait or see."
-                                                "\nCurrent view was:\n" +
-                                                wait_result.text}});
-
-        testing::ToolCall retry = decide(action_tools, messages, usage);
-        if (retry.name == "wait" || retry.name == "see") {
-            const std::string error = "Retry returned " + retry.name + " instead of an action (after: " + first_error + ")";
-            emit(Json{{"event", "turnFailed"}, {"error", error}});
-            TurnReport report;
-            report.ok = false;
-            report.error = error;
-            report.attempts = 1;
-            report.attempt_details = attempt_details;
-            report.usage = usage;
-            if (on_turn_result_) on_turn_result_(report);
-            continue;
-        }
-
-        emit(Json{{"event", "action"}, {"action", retry.name}, {"args", retry.arguments}});
-        result = call_tool(retry.name, retry.arguments);
-        if (!result.is_error) {
-            TurnReport report;
-            report.ok = true;
-            report.action = retry.name;
-            report.args = retry.arguments;
-            report.result = result.json;
-            report.attempts = 2;
-            report.usage = usage;
-            if (on_turn_result_) on_turn_result_(report);
-            continue;
-        }
-
-        const std::string second_error = tool_error_message(result);
-        attempt_details.push_back(Attempt{retry.name, retry.arguments, second_error});
-        log_line(logger_, "warn", "session " + session_id_ + " retry " + retry.name + " failed: " + second_error);
-        emit(Json{{"event", "turnFailed"},
-                  {"action", retry.name},
-                  {"args", retry.arguments},
-                  {"error", second_error}});
-        TurnReport report;
-        report.ok = false;
-        report.error = second_error;
-        report.attempts = 2;
-        report.attempt_details = std::move(attempt_details);
-        report.usage = usage;
-        if (on_turn_result_) on_turn_result_(report);
     }
 }
 
 testing::ToolCall SessionLoop::decide(const Json& tools, const Json& messages, TokenUsage& usage) {
-    auto decision = model_->decide(compose_instructions(instructions_, goal_), tools, messages);
+    std::string instructions = compose_instructions(instructions_, goal_);
+    instructions += std::string(instructions.empty() ? "" : "\n\n") + kSubgoalInstructions;
+    auto decision = model_->decide(instructions, tools, messages);
     usage.prompt_tokens += decision.usage.prompt_tokens;
     usage.completion_tokens += decision.usage.completion_tokens;
     if (on_usage_) on_usage_(decision.usage.prompt_tokens + decision.usage.completion_tokens);

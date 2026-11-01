@@ -171,6 +171,7 @@ The game decides whose turn it is by calling `turn()` on that handle.
 | `event.type` | Fields |
 | --- | --- |
 | `action` | `session_id`, `action`, `args` |
+| `subgoal` | `session_id`, `action`, `args`, and `error` when the call was rejected. `args` includes `id` when the platform assigned or received one |
 | `retry` | `session_id`, `action`, `args`, `error` |
 | `turnFailed` | `session_id`, `error`, and `action` / `args` when the retry was a real tool |
 | `disconnected` | none. No `session_id` |
@@ -194,7 +195,7 @@ The next `see()` view includes `done`, oldest first, up to the last 50 calls for
 }
 ```
 
-A refused call is `{ "ok": false, "error": "..." }`. A new `start()` has an empty `done` list. Older rows stay in the file. Two characters on one server share the file and see only their own rows. The name on each row is the `name` passed to `start()`, or the player type name.
+A refused call is `{ "ok": false, "error": "..." }`. A new `start()` has an empty `done` list. Past 50 calls, older ones become a single summary at the front of `done`: a count for each action, and the last error when one of them failed. Stopping the session deletes its rows. Two characters on one server share the file and see only their own rows. The name on each row is the `name` passed to `start()`, or the player type name.
 
 ```cpp
 wsi::AgentServer agents(wsi::AgentServerOptions{.memory_path = "saves/agents.sqlite"});

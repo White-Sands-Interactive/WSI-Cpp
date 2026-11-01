@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `subgoal` is its own listener event. `add_subgoal`, `update_subgoal`, and `complete_subgoal` are no longer reported as a failed turn. `turn()` still returns the game action.
+- The offline test loop accepts those three tools, up to four calls in a turn, and keeps the list only for that session.
+- Action history past the latest 50 calls for a session is folded into one summary. Stopping the session deletes its rows.
+
 ## 1.0.0
 
 First release of the C++ agent player SDK. It speaks the same protocol as `@whitesands/agent-player`, `whitesands.agent_player`, and `WhiteSands.AgentPlayer`.

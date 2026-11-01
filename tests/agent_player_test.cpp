@@ -1,4 +1,5 @@
 #include "memory.hpp"
+#include "session_loop.hpp"
 #include "turn_gate.hpp"
 #include "wsi/agent_player.hpp"
 #include "wsi/testing.hpp"
@@ -331,9 +332,56 @@ int main() {
                 memory.record("cap", "Ada", wsi::Json{{"action", "move"}, {"args", wsi::Json{{"dx", i}}}, {"ok", true}});
             }
             const auto done = memory.done("cap");
-            CHECK(done.size() == 50);
-            CHECK(done[0].at("args") == wsi::Json{{"dx", 5}});
-            CHECK(done[49].at("args") == wsi::Json{{"dx", 54}});
+            CHECK(done.size() == 51);
+            CHECK(done[0].at("summary").at("move") == 5);
+            CHECK(!done[0].contains("lastError"));
+            CHECK(done[1].at("args") == wsi::Json{{"dx", 5}});
+            CHECK(done[50].at("args") == wsi::Json{{"dx", 54}});
+            memory.close();
+        }
+        std::filesystem::remove_all(dir);
+    });
+
+    test("memory folds older rows and drops a finished session", [] {
+        const auto dir = std::filesystem::temp_directory_path() / ("wsi-memory-fold-" + std::to_string(std::rand()));
+        std::filesystem::create_directories(dir);
+        {
+            wsi::SessionMemory memory((dir / "memory.sqlite").string());
+            memory.record("ada", "Ada",
+                          wsi::Json{{"action", "cross"},
+                                    {"args", wsi::Json{{"passenger", "goat"}}},
+                                    {"ok", false},
+                                    {"error", "slipped"}});
+            memory.record("ada", "Ada",
+                          wsi::Json{{"action", "cross"},
+                                    {"args", wsi::Json{{"passenger", "wolf"}}},
+                                    {"ok", false},
+                                    {"error", "snapped"}});
+            for (int i = 0; i < 50; ++i) {
+                memory.record("ada", "Ada", wsi::Json{{"action", "move"}, {"args", wsi::Json{{"dx", i}}}, {"ok", true}});
+            }
+            const auto first = memory.done("ada");
+            CHECK(first.size() == 51);
+            CHECK(first[0].at("summary").at("cross") == 2);
+            CHECK(first[0].at("lastError") == "snapped");
+            CHECK(first[1].at("args") == wsi::Json{{"dx", 0}});
+            CHECK(first[50].at("args") == wsi::Json{{"dx", 49}});
+
+            for (int i = 50; i < 100; ++i) {
+                memory.record("ada", "Ada", wsi::Json{{"action", "move"}, {"args", wsi::Json{{"dx", i}}}, {"ok", true}});
+            }
+            const auto second = memory.done("ada");
+            CHECK(second.size() == 51);
+            CHECK(second[0].at("summary").at("cross") == 2);
+            CHECK(second[0].at("summary").at("move") == 50);
+            CHECK(second[0].at("lastError") == "snapped");
+            CHECK(second[1].at("args") == wsi::Json{{"dx", 50}});
+            CHECK(second[50].at("args") == wsi::Json{{"dx", 99}});
+
+            memory.record("bea", "Bea", wsi::Json{{"action", "move"}, {"args", wsi::Json{{"dx", 1}}}, {"ok", true}});
+            memory.forget("ada");
+            CHECK(memory.done("ada") == wsi::Json::array());
+            CHECK(memory.done("bea") == wsi::Json::parse(R"([{"action":"move","args":{"dx":1},"ok":true}])"));
             memory.close();
         }
         std::filesystem::remove_all(dir);
@@ -463,6 +511,99 @@ int main() {
         }
         CHECK(saw);
         agents.close();
+    });
+
+    test("subgoal is its own event and the turn stays the game action", [] {
+        std::vector<wsi::AgentEvent> events;
+        wsi::AgentServer agents(wsi::AgentServerOptions{
+            .inline_platform = wsi::testing::create_test_platform(
+                {wsi::testing::call("add_subgoal", wsi::Json{{"objective", "  reach the far side  "}}),
+                 wsi::testing::call("update_subgoal", wsi::Json{{"id", 1}, {"progress", " stepped once "}}),
+                 wsi::testing::call("move", wsi::Json{{"dx", 3}})}),
+            .on_event = [&](const wsi::AgentEvent& event) { events.push_back(event); },
+            .memory = false,
+        });
+        TinyWorld world;
+        auto agent = agents.start(world);
+        const auto result = agent.turn();
+        CHECK(result.action == "move");
+        CHECK(result.attempts == 1);
+        CHECK(world.x == 3);
+        CHECK(events.size() == 3);
+        CHECK(events[0].type == "subgoal");
+        CHECK(events[0].action == "add_subgoal");
+        CHECK(events[0].args->at("id") == "1");
+        CHECK(events[0].args->at("objective") == "  reach the far side  ");
+        CHECK(!events[0].error);
+        CHECK(events[1].type == "subgoal");
+        CHECK(events[1].action == "update_subgoal");
+        CHECK(events[1].args->at("id") == "1");
+        CHECK(events[2].type == "action");
+        agents.close();
+    });
+
+    test("a rejected subgoal is not a failed turn", [] {
+        std::vector<wsi::AgentEvent> events;
+        wsi::AgentServer agents(wsi::AgentServerOptions{
+            .inline_platform = wsi::testing::create_test_platform(
+                {wsi::testing::call("add_subgoal", wsi::Json{{"objective", "   "}}),
+                 wsi::testing::call("move", wsi::Json{{"dx", 1}})}),
+            .on_event = [&](const wsi::AgentEvent& event) { events.push_back(event); },
+            .memory = false,
+        });
+        TinyWorld world;
+        auto agent = agents.start(world);
+        const auto result = agent.turn();
+        CHECK(result.action == "move");
+        CHECK(result.attempts == 1);
+        CHECK(events.size() == 2);
+        CHECK(events[0].type == "subgoal");
+        CHECK(events[0].error == "objective is required");
+        CHECK(events[1].type == "action");
+        agents.close();
+    });
+
+    test("completing a subgoal removes it", [] {
+        std::vector<std::string> views;
+        wsi::AgentServer agents(wsi::AgentServerOptions{
+            .inline_platform = wsi::testing::create_test_platform(std::make_shared<ViewModel>(
+                views, std::vector<wsi::testing::ToolCall>{
+                           wsi::testing::call("add_subgoal", wsi::Json{{"objective", "reach the far side"}}),
+                           wsi::testing::call("move", wsi::Json{{"dx", 1}}),
+                           wsi::testing::call("complete_subgoal", wsi::Json{{"id", "1"}}),
+                           wsi::testing::call("move", wsi::Json{{"dx", 1}}),
+                           wsi::testing::call("move", wsi::Json{{"dx", 1}})})),
+            .memory = false,
+        });
+        TinyWorld world;
+        auto agent = agents.start(world);
+        agent.turn();
+        agent.turn();
+        agent.turn();
+        CHECK(views.at(0).find("Active subgoals: none.") != std::string::npos);
+        CHECK(views.at(2).find("1. reach the far side") != std::string::npos);
+        CHECK(views.at(4).find("Active subgoals: none.") != std::string::npos);
+        CHECK(world.x == 3);
+        agents.close();
+    });
+
+    test("a platform subgoal event is not a failed turn", [] {
+        const auto event = wsi::loop_event_to_agent_event(
+            "s1", wsi::Json{{"event", "subgoal"},
+                            {"action", "add_subgoal"},
+                            {"args", wsi::Json{{"objective", "reach the far side"}, {"id", "1"}}}});
+        CHECK(event.type == "subgoal");
+        CHECK(event.action == "add_subgoal");
+        CHECK(event.args->at("id") == "1");
+        CHECK(!event.error);
+
+        const auto rejected = wsi::loop_event_to_agent_event(
+            "s1", wsi::Json{{"event", "subgoal"},
+                            {"action", "add_subgoal"},
+                            {"args", wsi::Json{{"objective", ""}}},
+                            {"error", "objective is required"}});
+        CHECK(rejected.type == "subgoal");
+        CHECK(rejected.error == "objective is required");
     });
 
     test("retries once after a rejected action", [] {
@@ -647,6 +788,67 @@ int main() {
         CHECK(result.action == "wave");
         CHECK(result.result == wsi::Json{{"ok", true}});
         CHECK(result.usage.completion_tokens == 1);
+        agents.close();
+    });
+
+    test("remote subgoal event is not a failed turn", [] {
+        FakePlatform platform;
+        std::vector<wsi::AgentEvent> events;
+        std::mutex events_mu;
+        wsi::AgentServer agents(wsi::AgentServerOptions{
+            .platform_key = "pk_test",
+            .on_event = [&](const wsi::AgentEvent& event) {
+                std::lock_guard lock(events_mu);
+                events.push_back(event);
+            },
+            .memory = false,
+            .platform_url = platform.url(),
+        });
+        Pawn pawn;
+        auto agent = agents.start(pawn, wsi::StartOptions{.goal = "Step"});
+        wsi::TurnResult result;
+        std::exception_ptr error;
+        std::thread turning([&] {
+            try {
+                result = agent.turn(wsi::TurnOptions{.timeout_ms = 5000});
+            } catch (...) {
+                error = std::current_exception();
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        platform.send_latest(wsi::Json{{"type", "session_event"},
+                                       {"sessionId", agent.session_id()},
+                                       {"event", "subgoal"},
+                                       {"action", "add_subgoal"},
+                                       {"args", wsi::Json{{"objective", "reach the far side"}, {"id", "1"}}}}
+                                 .dump());
+        platform.send_latest(wsi::Json{{"type", "turn_result"},
+                                       {"sessionId", agent.session_id()},
+                                       {"ok", true},
+                                       {"action", "move"},
+                                       {"args", wsi::Json{{"dx", 1}}},
+                                       {"result", wsi::Json{{"dx", 1}}},
+                                       {"attempts", 1},
+                                       {"usage", wsi::Json{{"promptTokens", 3}, {"completionTokens", 2}}}}
+                                 .dump());
+        turning.join();
+        if (error) std::rethrow_exception(error);
+        CHECK(result.action == "move");
+        CHECK(result.attempts == 1);
+        bool saw_subgoal = false;
+        bool saw_failure = false;
+        {
+            std::lock_guard lock(events_mu);
+            for (const auto& event : events) {
+                if (event.type == "subgoal" && event.action == "add_subgoal" && event.args &&
+                    event.args->at("id") == "1") {
+                    saw_subgoal = true;
+                }
+                if (event.type == "turnFailed") saw_failure = true;
+            }
+        }
+        CHECK(saw_subgoal);
+        CHECK(!saw_failure);
         agents.close();
     });
 

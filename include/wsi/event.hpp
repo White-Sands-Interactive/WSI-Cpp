@@ -11,9 +11,10 @@
 
 namespace wsi {
 
-/// One action, retry, failure, or connection change.
+/// One action, subgoal change, retry, failure, or connection change.
 /// `disconnected` and `reconnected` have no session id.
-/// `type` is `action`, `retry`, `turnFailed`, `disconnected`, or `reconnected`.
+/// `type` is `action`, `subgoal`, `retry`, `turnFailed`, `disconnected`, or `reconnected`.
+/// A `subgoal` event's `args` carries `id` when the platform assigned or received one.
 struct AgentEvent {
     std::string type;
     std::optional<std::string> session_id;

@@ -76,6 +76,16 @@ AgentEvent event_from_wire(const Json& envelope) {
         event.error = envelope.value("error", "action failed");
         return event;
     }
+    if (name == "subgoal") {
+        event.type = "subgoal";
+        event.action = envelope.value("action", "unknown");
+        event.args = std::move(args);
+        if (envelope.contains("error") && envelope.at("error").is_string() &&
+            !envelope.at("error").get<std::string>().empty()) {
+            event.error = envelope.at("error").get<std::string>();
+        }
+        return event;
+    }
     event.type = "turnFailed";
     event.error = envelope.value("error", "turn failed");
     if (envelope.contains("action") && envelope.at("action").is_string() &&
@@ -245,10 +255,17 @@ void AgentServer::State::stop_session(const std::string& session_id) {
         }
     }
     session->server->close();
+    std::shared_ptr<SessionMemory> store;
+    {
+        std::lock_guard lock(mu);
+        store = memory;
+    }
+    if (store) store->forget(session_id);
 }
 
 std::shared_ptr<SessionMemory> AgentServer::State::action_memory() {
     if (!memory_enabled) return nullptr;
+    std::lock_guard lock(mu);
     if (!memory) {
         const std::string path = memory_path ? *memory_path : default_memory_path();
         memory = std::make_shared<SessionMemory>(path);

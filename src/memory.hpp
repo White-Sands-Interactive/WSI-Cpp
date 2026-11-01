@@ -19,6 +19,8 @@ class SessionMemory {
 
     void record(const std::string& session_id, const std::string& character, const Json& entry);
     Json done(const std::string& session_id) const;
+    /// Drop every row for a session that has ended, including its summary.
+    void forget(const std::string& session_id);
     void close();
 
  private:
