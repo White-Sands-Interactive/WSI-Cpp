@@ -6,6 +6,7 @@
 #include "turn_gate.hpp"
 #include "uuid.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
@@ -16,6 +17,68 @@ namespace wsi {
 namespace {
 
 constexpr int kDefaultTurnTimeoutMs = 60000;
+
+std::string trim_copy(std::string value) {
+    auto space = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!value.empty() && space(static_cast<unsigned char>(value.front()))) value.erase(value.begin());
+    while (!value.empty() && space(static_cast<unsigned char>(value.back()))) value.pop_back();
+    return value;
+}
+
+bool is_hex_char(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+bool is_character_id(const std::string& id) {
+    constexpr int kGroups[] = {8, 4, 4, 4, 12};
+    std::size_t index = 0;
+    for (int group = 0; group < 5; ++group) {
+        if (group > 0) {
+            if (index >= id.size() || id[index] != '-') return false;
+            ++index;
+        }
+        for (int count = 0; count < kGroups[group]; ++count) {
+            if (index >= id.size() || !is_hex_char(id[index])) return false;
+            ++index;
+        }
+    }
+    return index == id.size();
+}
+
+std::string quoted(const std::string& value) {
+    std::string out = "\"";
+    for (const unsigned char c : value) {
+        if (c == '\\' || c == '"') {
+            out.push_back('\\');
+            out.push_back(static_cast<char>(c));
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else {
+            out.push_back(static_cast<char>(c));
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+std::string require_player_id(const std::optional<std::string>& raw, bool required) {
+    const std::string id = trim_copy(raw.value_or(""));
+    if (id.empty()) {
+        if (required) {
+            throw std::runtime_error("playerId is required. Copy the character ID from the web app");
+        }
+        return "";
+    }
+    if (!is_character_id(id)) {
+        throw std::runtime_error("playerId " + quoted(id) +
+                                 " is not a character ID. Copy the ID from the character in the web app");
+    }
+    return id;
+}
 
 std::string join_instructions(const std::optional<std::string>& server, const std::optional<std::string>& start) {
     const std::string base = server ? *server : default_agent_instructions();
@@ -367,6 +430,7 @@ AgentServer& AgentServer::operator=(AgentServer&& other) noexcept {
 AgentHandle AgentServer::start(Player& player, const StartOptions& options) {
     if (!state_) throw std::runtime_error("AgentServer is closed");
     state_->ensure_connected();
+    const std::string player_id = require_player_id(options.player_id, state_->inline_platform == nullptr);
     ReflectedPlayer reflected = player.reflect();
     const std::string session_id = uuid_v4();
     const std::string session_token = uuid_v4();
@@ -402,6 +466,7 @@ AgentHandle AgentServer::start(Player& player, const StartOptions& options) {
         request.tools = tools;
         request.instructions = prompt;
         if (options.goal && !options.goal->empty()) request.goal = options.goal;
+        request.player_id = player_id;
         request.on_turn_result = [gate](const TurnReport& report) { gate->complete_turn(report); };
         request.on_event = [state = state_](const AgentEvent& event) { state->emit(event); };
         request.on_usage = {};
@@ -425,7 +490,8 @@ AgentHandle AgentServer::start(Player& player, const StartOptions& options) {
         try {
             state_->connection->begin_wait(session_id, "start");
             Json body = Json{{"type", "start_session"}, {"sessionId", session_id}, {"sessionToken", session_token},
-                             {"name", player_name},     {"tools", tools},           {"instructions", prompt}};
+                             {"name", player_name},     {"tools", tools},           {"instructions", prompt},
+                             {"playerId", player_id}};
             if (options.goal && !options.goal->empty()) body["goal"] = *options.goal;
             state_->connection->send(body);
             state_->connection->wait(session_id, "start");

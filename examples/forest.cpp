@@ -115,6 +115,14 @@ std::string required_key() {
     return value;
 }
 
+std::string required_player_id(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        throw std::runtime_error(std::string(name) + " is required for --remote");
+    }
+    return value;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -140,8 +148,15 @@ int main(int argc, char** argv) {
             });
         }
 
-        auto ada_agent = agents->start(ada, wsi::StartOptions{.goal = "Stand on the tree and chop it"});
-        auto bea_agent = agents->start(bea);
+        wsi::StartOptions ada_options;
+        ada_options.goal = "Stand on the tree and chop it";
+        wsi::StartOptions bea_options;
+        if (remote) {
+            ada_options.player_id = required_player_id("WSI_PLAYER_ID");
+            bea_options.player_id = required_player_id("WSI_PLAYER_ID_2");
+        }
+        auto ada_agent = agents->start(ada, ada_options);
+        auto bea_agent = agents->start(bea, bea_options);
         const auto moved = ada_agent.turn();
         std::cout << "\nAda " << moved.action << "(" << moved.args.dump() << ")\n";
         std::cout << "Ada at (" << ada.x() << "," << ada.y() << ") tile=" << world.get(ada.x(), ada.y())

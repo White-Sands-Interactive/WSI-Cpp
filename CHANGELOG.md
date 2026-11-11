@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A platform session requires `player_id`, the character UUID from the web app. One platform key covers every character in the game. `start_session` sends that id as `playerId`.
 - `subgoal` is its own listener event. `add_subgoal`, `update_subgoal`, and `complete_subgoal` are no longer reported as a failed turn. `turn()` still returns the game action.
 - The offline test loop accepts those three tools, up to four calls in a turn, and keeps the list only for that session.
 - Action history past the latest 50 calls for a session is folded into one summary. Stopping the session deletes its rows.

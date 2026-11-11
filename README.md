@@ -25,7 +25,7 @@ ctest --test-dir build --output-on-failure
 
 ## Usage
 
-Set the platform key, then start one agent per character. `turn()` grants that character one chance to act and returns what they did. It blocks the calling thread.
+Set the platform key, then start one agent per character. The key belongs to the game. Each `start()` also names the character with `player_id`, the UUID copied from the Players page of the web app. `turn()` grants that character one chance to act and returns what they did. It blocks the calling thread.
 
 ```sh
 export WSI_PLATFORM_KEY=pk_...
@@ -37,7 +37,10 @@ The SDK connects to `wss://api.whitesandsint.com`. That address is not read from
 #include "wsi/agent_player.hpp"
 
 wsi::AgentServer agents;
-auto ada = agents.start(villager, wsi::StartOptions{.goal = "Stand on the tree and chop it"});
+auto ada = agents.start(villager, wsi::StartOptions{
+    .goal = "Stand on the tree and chop it",
+    .player_id = "3f6c2d1e-8b7a-4c5d-9e0f-1a2b3c4d5e6f",
+});
 
 wsi::TurnResult result = ada.turn();
 // result.action, result.args, result.result, result.attempts, result.usage
@@ -152,11 +155,11 @@ The SDK reconnects with backoff. A disconnected session can be resumed for 30 se
 
 ### Several characters
 
-One `AgentServer` hosts every character. Each `start()` is its own session.
+One `AgentServer` hosts every character, and one platform key covers the whole game. Each `start()` is its own session and carries that character's `player_id`. The offline test platform does not require one.
 
 ```cpp
-auto ada = agents.start(ada_villager, wsi::StartOptions{.name = "Ada", .goal = "Chop the tree"});
-auto bea = agents.start(bea_villager, wsi::StartOptions{.name = "Bea", .goal = "Carry wood home"});
+auto ada = agents.start(ada_villager, wsi::StartOptions{.name = "Ada", .goal = "Chop the tree", .player_id = ada_id});
+auto bea = agents.start(bea_villager, wsi::StartOptions{.name = "Bea", .goal = "Carry wood home", .player_id = bea_id});
 
 ada.turn();
 bea.turn();

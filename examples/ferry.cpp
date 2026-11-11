@@ -131,6 +131,12 @@ std::string required_key() {
     return value;
 }
 
+std::string required_player_id() {
+    const char* value = std::getenv("WSI_PLAYER_ID");
+    if (value == nullptr || value[0] == '\0') throw std::runtime_error("WSI_PLAYER_ID is required for --remote");
+    return value;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -152,7 +158,11 @@ int main(int argc, char** argv) {
             agents = std::make_unique<wsi::AgentServer>(
                 wsi::AgentServerOptions{.inline_platform = wsi::testing::create_test_platform(std::move(script))});
         }
-        auto agent = agents->start(ferry, wsi::StartOptions{.name = "Ferryman", .goal = kGoal});
+        wsi::StartOptions options;
+        options.name = "Ferryman";
+        options.goal = kGoal;
+        if (remote) options.player_id = required_player_id();
+        auto agent = agents->start(ferry, options);
         const int limit = remote ? 12 : static_cast<int>(kSolution.size());
         for (int turn = 1; turn <= limit && !ferry.see().at("solved").get<bool>(); ++turn) {
             try {

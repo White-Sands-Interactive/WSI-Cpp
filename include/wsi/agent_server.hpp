@@ -31,6 +31,9 @@ struct StartOptions {
     std::optional<std::string> goal;
     /// Extra instructions appended to the default agent prompt.
     std::optional<std::string> instructions;
+    /// Character ID from the Players page. Required when connecting to the platform.
+    /// One platform key covers every character in the game; this field chooses which one plays.
+    std::optional<std::string> player_id;
 };
 
 /// What an inline platform receives for one player.
@@ -41,6 +44,8 @@ struct StartSession {
     Json tools = Json::array();
     std::string instructions;
     std::optional<std::string> goal;
+    /// Character ID, when the caller supplied one. The offline loop does not read it.
+    std::string player_id;
     std::function<void(const TurnReport&)> on_turn_result;
     std::function<void(const AgentEvent&)> on_event;
     std::function<void(int tokens)> on_usage;
@@ -61,9 +66,10 @@ class InlinePlatform {
 };
 
 struct AgentServerOptions {
-    /// Platform key naming the billing account.
+    /// Platform key for the game. Every session on this connection uses it.
     /// Defaults to the WSI_PLATFORM_KEY environment variable.
     /// Not required when inline_platform is set.
+    /// The character is selected per session with StartOptions::player_id.
     std::optional<std::string> platform_key;
     /// Skip the outbound WebSocket and run against this in-process platform.
     std::shared_ptr<InlinePlatform> inline_platform;

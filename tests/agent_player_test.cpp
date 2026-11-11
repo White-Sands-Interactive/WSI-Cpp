@@ -791,6 +791,79 @@ int main() {
         agents.close();
     });
 
+    test("a platform session requires a character id", [] {
+        const auto id = std::string("3f6c2d1e-8b7a-4c5d-9e0f-1a2b3c4d5e6f");
+        {
+            FakePlatform platform;
+            wsi::AgentServer agents(wsi::AgentServerOptions{
+                .platform_key = "pk_test",
+                .memory = false,
+                .platform_url = platform.url(),
+            });
+            Pawn pawn;
+            bool threw = false;
+            try {
+                agents.start(pawn);
+            } catch (const std::runtime_error& error) {
+                threw = std::string(error.what()) == "playerId is required. Copy the character ID from the web app";
+            }
+            CHECK(threw);
+            for (const auto& item : platform.received()) {
+                CHECK(item.value("type", "") != "start_session");
+            }
+            agents.close();
+        }
+        {
+            FakePlatform platform;
+            wsi::AgentServer agents(wsi::AgentServerOptions{
+                .platform_key = "pk_test",
+                .memory = false,
+                .platform_url = platform.url(),
+            });
+            Pawn pawn;
+            bool threw = false;
+            try {
+                agents.start(pawn, wsi::StartOptions{.player_id = "  not-a-character  "});
+            } catch (const std::runtime_error& error) {
+                threw = std::string(error.what()) ==
+                        "playerId \"not-a-character\" is not a character ID. Copy the ID from the character in the web app";
+            }
+            CHECK(threw);
+            agents.close();
+        }
+        {
+            FakePlatform platform;
+            wsi::AgentServer agents(wsi::AgentServerOptions{
+                .platform_key = "pk_test",
+                .memory = false,
+                .platform_url = platform.url(),
+            });
+            Pawn pawn;
+            auto agent = agents.start(pawn, wsi::StartOptions{.player_id = "  " + id + "  "});
+            bool sent = false;
+            for (const auto& item : platform.received()) {
+                if (item.value("type", "") == "start_session") {
+                    CHECK(item.at("playerId") == id);
+                    sent = true;
+                }
+            }
+            CHECK(sent);
+            agent.stop();
+            agents.close();
+        }
+        {
+            wsi::AgentServer agents(wsi::AgentServerOptions{
+                .inline_platform = wsi::testing::create_test_platform({wsi::testing::call("move", wsi::Json{{"dx", 1}})}),
+                .memory = false,
+            });
+            Pawn pawn;
+            auto agent = agents.start(pawn);
+            const auto result = agent.turn();
+            CHECK(result.action == "move");
+            agents.close();
+        }
+    });
+
     test("remote subgoal event is not a failed turn", [] {
         FakePlatform platform;
         std::vector<wsi::AgentEvent> events;
@@ -805,7 +878,7 @@ int main() {
             .platform_url = platform.url(),
         });
         Pawn pawn;
-        auto agent = agents.start(pawn, wsi::StartOptions{.goal = "Step"});
+        auto agent = agents.start(pawn, wsi::StartOptions{.goal = "Step", .player_id = "3f6c2d1e-8b7a-4c5d-9e0f-1a2b3c4d5e6f"});
         wsi::TurnResult result;
         std::exception_ptr error;
         std::thread turning([&] {
@@ -905,12 +978,13 @@ int main() {
                 .platform_url = platform.url(),
             });
             Pawn pawn;
-            auto agent = agents.start(pawn, wsi::StartOptions{.goal = "Step"});
+            auto agent = agents.start(pawn, wsi::StartOptions{.goal = "Step", .player_id = "3f6c2d1e-8b7a-4c5d-9e0f-1a2b3c4d5e6f"});
             wsi::Json started;
             for (const auto& item : platform.received()) {
                 if (item.value("type", "") == "start_session") started = item;
             }
             CHECK(started.at("goal") == "Step");
+            CHECK(started.at("playerId") == "3f6c2d1e-8b7a-4c5d-9e0f-1a2b3c4d5e6f");
             platform.abort_first();
             wait_until([&] {
                 std::lock_guard lock(events_mu);
@@ -936,6 +1010,11 @@ int main() {
                 }
             }
             CHECK(resumed);
+            for (const auto& item : platform.received()) {
+                if (item.value("type", "") == "resume_session") {
+                    CHECK(!item.contains("playerId"));
+                }
+            }
             wsi::TurnResult result;
             std::exception_ptr error;
             std::thread turning([&] {
