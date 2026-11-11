@@ -8,7 +8,7 @@ namespace wsi {
 /// The Node, Python, and C# SDKs speak this same version.
 inline constexpr int kProtocolVersion = 1;
 
-inline constexpr const char* kSdkVersion = "1.0.0";
+inline constexpr const char* kSdkVersion = "1.1.0";
 
 /// How long a disconnected session can be resumed. Shared by both sides.
 inline constexpr int kSessionResumeGraceMs = 30000;
